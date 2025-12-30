@@ -1,4 +1,5 @@
 <?php
+// File: api/provider/jobs/new_requests.php
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: GET");
@@ -12,7 +13,7 @@ if (!isset($_GET['provider_id'])) {
 
 $provider_id = $_GET['provider_id'];
 
-// শুধুমাত্র 'pending' রিকোয়েস্টগুলো দেখাবে
+// শুধুমাত্র 'pending' কাজগুলো দেখাবে
 $sql = "SELECT id, service_name, location, details, amount, booking_date 
         FROM bookings 
         WHERE provider_id = '$provider_id' AND status = 'pending' 

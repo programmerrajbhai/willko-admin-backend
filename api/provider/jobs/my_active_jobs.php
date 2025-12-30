@@ -1,4 +1,5 @@
 <?php
+// File: api/provider/jobs/my_active_jobs.php
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: GET");
@@ -12,11 +13,12 @@ if (!isset($_GET['provider_id'])) {
 
 $provider_id = $_GET['provider_id'];
 
-// শুধুমাত্র 'accepted' কাজগুলো দেখাবে
-$sql = "SELECT id, service_name, location, details, amount, booking_date, status 
+// ✅ FIX: 'pending' ছাড়া বাকি সব Active স্ট্যাটাস এখানে আসবে
+$sql = "SELECT id, service_name, location, details, amount, booking_date, status, customer_name, customer_phone 
         FROM bookings 
-        WHERE provider_id = '$provider_id' AND status = 'accepted' 
-        ORDER BY booking_date ASC";
+        WHERE provider_id = '$provider_id' 
+        AND status IN ('accepted', 'ongoing', 'working', 'arrived', 'in_progress') 
+        ORDER BY booking_date DESC";
 
 $result = $conn->query($sql);
 
