@@ -1,33 +1,52 @@
 <?php
-// File: api/provider/auth/check_status.php
-
-include '../../../db.php';
-// 1. Error Reporting ON (সমস্যা দেখার জন্য)
+// ১. এরর রিপোর্টিং
 ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
-header("Access-Control-Allow-Origin: *");
-header("Content-Type: application/json; charset=UTF-8");
-header("Access-Control-Allow-Methods: GET");
-
-
-// 2. Database কানেকশন ফাইল খোঁজা (Smart Path Finding)
-$current_dir = __DIR__; 
-$possible_paths = [
-    __DIR__ . '/../../db.php',       
-    __DIR__ . '/../../../db.php',    
-];
-
-
-// Check if connection works
-if (!isset($conn) || $conn->connect_error) {
-    http_response_code(500);
-    echo json_encode(["status" => "error", "message" => "Database connection failed"]);
-    exit();
+// ২. CORS এবং হেডার সেটআপ (সবচেয়ে গুরুত্বপূর্ণ অংশ)
+// Flutter Web এর জন্য OPTIONS মেথড এবং Authorization হেডার অ্যালাউ করা বাধ্যতামূলক
+if (isset($_SERVER['HTTP_ORIGIN'])) {
+    header("Access-Control-Allow-Origin: {$_SERVER['HTTP_ORIGIN']}");
+    header('Access-Control-Allow-Credentials: true');
+    header('Access-Control-Max-Age: 86400');    // cache for 1 day
 }
 
-// 3. Helper Function to get Authorization Header
+// Access-Control headers received during OPTIONS requests
+if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+    if (isset($_SERVER['HTTP_ACCESS_CONTROL_REQUEST_METHOD']))
+        header("Access-Control-Allow-Methods: GET, POST, OPTIONS");         
+
+    if (isset($_SERVER['HTTP_ACCESS_CONTROL_REQUEST_HEADERS']))
+        header("Access-Control-Allow-Headers: {$_SERVER['HTTP_ACCESS_CONTROL_REQUEST_HEADERS']}");
+
+    exit(0); // OPTIONS রিকোয়েস্ট এখানেই শেষ করা জরুরি
+}
+
+header("Content-Type: application/json; charset=UTF-8");
+
+// ৩. ডাটাবেস কানেকশন (Smart Path Finding)
+$db_loaded = false;
+$possible_paths = [
+    __DIR__ . '/../../../db.php', 
+    __DIR__ . '/../../db.php', 
+    $_SERVER['DOCUMENT_ROOT'] . '/willko-admin-backend/db.php'
+];
+
+foreach ($possible_paths as $path) { 
+    if (file_exists($path)) { 
+        include $path; 
+        $db_loaded = true; 
+        break; 
+    } 
+}
+
+if (!$db_loaded) { 
+    http_response_code(500); 
+    echo json_encode(["status" => "error", "message" => "Database connection failed"]); 
+    exit(); 
+}
+
+// ৪. Auth Helper Function
 function getBearerToken() {
     $headers = null;
     if (isset($_SERVER['Authorization'])) {
@@ -54,44 +73,35 @@ function getBearerToken() {
 $token = getBearerToken();
 
 if (empty($token)) {
-    http_response_code(401); // Unauthorized
-    echo json_encode(["status" => "error", "message" => "Token missing"]);
-    exit();
+    http_response_code(401); 
+    echo json_encode(["status" => "error", "message" => "Unauthorized: Token missing"]); 
+    exit(); 
 }
 
-// 4. Safe Query (Only selecting fields confirmed to exist)
-// আগের কোডের ফিল্ডগুলোই রাখলাম যাতে এরর না দেয়
-$sql = "SELECT status, name, category FROM users WHERE auth_token = ? AND role = 'provider' LIMIT 1";
+// ৫. ডাটাবেস চেক (Query)
+$stmt = $conn->prepare("SELECT id, status, name, category, document_image FROM users WHERE auth_token = ? AND role = 'provider'");
+$stmt->bind_param("s", $token);
+$stmt->execute();
+$res = $stmt->get_result();
 
-if ($stmt = $conn->prepare($sql)) {
-    $stmt->bind_param("s", $token);
-    $stmt->execute();
-    $result = $stmt->get_result();
+if ($res->num_rows > 0) {
+    $row = $res->fetch_assoc();
+    
+    // লজিক: যদি document_image কলামে ডাটা থাকে, তার মানে ফাইল সাবমিট করা হয়েছে
+    $is_submitted = !empty($row['document_image']);
 
-    if ($result->num_rows > 0) {
-        $row = $result->fetch_assoc();
-        
-        // Success Response
-        http_response_code(200);
-        echo json_encode([
-            "status" => "success",
-            "account_status" => $row['status'],
-            "data" => $row
-        ]);
-    } else {
-        http_response_code(401);
-        echo json_encode(["status" => "error", "message" => "Invalid Token or User not found"]);
-    }
-    $stmt->close();
-} else {
-    // Query Error Details
-    http_response_code(500);
     echo json_encode([
-        "status" => "error", 
-        "message" => "Query Failed", 
-        "debug" => $conn->error // এরর মেসেজ দেখাবে
+        "status" => "success",
+        "account_status" => $row['status'], // active, pending, blocked
+        "is_doc_submitted" => $is_submitted, // true / false
+        "data" => [
+            "name" => $row['name'],
+            "category" => $row['category']
+        ]
     ]);
+} else {
+    http_response_code(401);
+    echo json_encode(["status" => "error", "message" => "Invalid Token"]);
 }
-
 $conn->close();
 ?>
