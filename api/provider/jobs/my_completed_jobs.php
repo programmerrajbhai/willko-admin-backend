@@ -1,5 +1,5 @@
 <?php
-// File: api/provider/jobs/new_requests.php
+// File: api/provider/jobs/my_completed_jobs.php
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: GET");
@@ -13,11 +13,12 @@ if (!isset($_GET['provider_id'])) {
 
 $provider_id = $_GET['provider_id'];
 
-// শুধুমাত্র 'pending' কাজগুলো দেখাবে
-$sql = "SELECT id, service_name, location, details, amount, booking_date 
+// Completed, Cancelled বা Rejected কাজগুলো আনবে
+$sql = "SELECT id, service_name, location, details, amount, booking_date, status, customer_name, customer_phone 
         FROM bookings 
-      WHERE provider_id = '$provider_id' AND status = 'pending'
-        ORDER BY id DESC";
+        WHERE provider_id = '$provider_id' 
+        AND status IN ('completed', 'cancelled', 'rejected') 
+        ORDER BY booking_date DESC";
 
 $result = $conn->query($sql);
 
@@ -28,9 +29,8 @@ if ($result->num_rows > 0) {
     }
     echo json_encode(["status" => "success", "data" => $jobs]);
 } else {
-    echo json_encode(["status" => "success", "message" => "No new job requests", "data" => []]);
+    echo json_encode(["status" => "success", "message" => "No history found", "data" => []]);
 }
-
 
 $conn->close();
 ?>
