@@ -1,42 +1,60 @@
 <?php
-// File: api/provider/jobs/accept_reject.php
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: POST");
 
-include '../../../db.php';
+// 1. DB Connection (Dynamic Path Check)
+$current_dir = __DIR__;
+if (file_exists(dirname(dirname(dirname(__DIR__))) . '/db.php')) {
+    include dirname(dirname(dirname(__DIR__))) . '/db.php';
+} else {
+    include '../../../db.php';
+}
 
-$data = json_decode(file_get_contents("php://input"));
+// 2. ইনপুট ডাটা নেওয়া
+$data = json_decode(file_get_contents("php://input"), true);
 
-if (!isset($data->booking_id) || !isset($data->provider_id) || !isset($data->action)) {
+if (empty($data['booking_id']) || empty($data['provider_id']) || empty($data['action'])) {
     echo json_encode(["status" => "error", "message" => "Missing required fields"]);
     exit();
 }
 
-$booking_id = $data->booking_id;
-$provider_id = $data->provider_id;
-$action = strtolower($data->action);
+$booking_id = (int)$data['booking_id']; // Security check
+$provider_id = (int)$data['provider_id']; // Security check
+$action = strtolower(trim($data['action']));
 
-// স্ট্যাটাস লজিক
-if ($action == 'accept') {
-    $new_status = 'accepted';
+// 3. স্ট্যাটাস লজিক
+if ($action === 'accept') {
+    $new_status = 'accepted'; // অথবা 'on_going' যদি আপনার ফ্লোতে থাকে
     $msg = "Job Accepted Successfully";
-} elseif ($action == 'reject') {
-    $new_status = 'rejected'; // অথবা provider_id = NULL করে দিতে পারেন যাতে অন্য কেউ পায়
+} elseif ($action === 'reject') {
+    $new_status = 'cancelled'; // রিজেক্ট করলে ক্যানসেল অথবা রিজেক্টেড
     $msg = "Job Rejected";
 } else {
-    echo json_encode(["status" => "error", "message" => "Invalid action"]);
+    echo json_encode(["status" => "error", "message" => "Invalid action. Use 'accept' or 'reject'."]);
     exit();
 }
 
-// আপডেট কুয়েরি
-$sql = "UPDATE bookings SET status = '$new_status' WHERE id = '$booking_id' AND provider_id = '$provider_id'";
+// 4. Secure Update Query (Prepared Statement)
+// চেক করা হচ্ছে যেন এই প্রোভাইডারই এই জবটি এক্সেপ্ট/রিজেক্ট করতে পারে
+$sql = "UPDATE bookings SET status = ? WHERE id = ? AND provider_id = ?";
 
-if ($conn->query($sql) === TRUE) {
-    echo json_encode(["status" => "success", "message" => $msg]);
+$stmt = $conn->prepare($sql);
+$stmt->bind_param("sii", $new_status, $booking_id, $provider_id);
+
+if ($stmt->execute()) {
+    if ($stmt->affected_rows > 0) {
+        // সফল হলে
+        echo json_encode(["status" => "success", "message" => $msg]);
+        
+        // (Optional) আপনি চাইলে এখানে অ্যাডমিনের কাছে নোটিফিকেশন পাঠানোর লজিক যোগ করতে পারেন
+    } else {
+        echo json_encode(["status" => "error", "message" => "Job not found or already updated"]);
+    }
 } else {
-    echo json_encode(["status" => "error", "message" => "Update failed: " . $conn->error]);
+    echo json_encode(["status" => "error", "message" => "Database error: " . $stmt->error]);
 }
 
+$stmt->close();
 $conn->close();
 ?>
