@@ -3,57 +3,56 @@ header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: POST");
 
-// DB & Auth
-$current_dir = __DIR__;
-$api_dir = dirname(dirname(dirname($current_dir)));
-if (file_exists($api_dir . '/db.php')) include $api_dir . '/db.php';
-else include dirname($api_dir) . '/db.php';
+include_once "../../config/database.php"; // আপনার ডাটাবেস কানেকশন পাথ অনুযায়ী
 
-// Auth Check
-$headers = getallheaders();
-$token = isset($headers['Authorization']) ? substr($headers['Authorization'], 7) : '';
-if ($conn->query("SELECT id FROM users WHERE auth_token = '$token' AND role = 'admin'")->num_rows == 0) {
-    echo json_encode(["status" => "error", "message" => "Unauthorized"]);
-    exit();
+$database = new Database();
+$db = $database->getConnection();
+
+$data = json_decode(file_get_contents("php://input"));
+
+if (!empty($data->provider_id) && !empty($data->amount) && !empty($data->admin_id)) {
+    
+    $provider_id = $data->provider_id;
+    $amount = $data->amount; // কত টাকা কালেক্ট করা হলো
+    $admin_id = $data->admin_id;
+
+    try {
+        $db->beginTransaction();
+
+        // 1. Update Provider Balance (টাকা দিলে Due কমবে, তাই ব্যালেন্স বাড়বে অথবা Due ফিল্ড কমবে)
+        // ধরুন: positive balance মানে প্রোভাইডার পাবে, negative মানে সে ঋণী।
+        // তাই টাকা দিলে ব্যালেন্স বাড়বে (Example: -500 + 500 = 0)
+        
+        $query = "UPDATE providers SET balance = balance + :amount WHERE id = :id";
+        $stmt = $db->prepare($query);
+        $stmt->bindParam(':amount', $amount);
+        $stmt->bindParam(':id', $provider_id);
+        
+        if(!$stmt->execute()){
+            throw new Exception("Provider balance update failed.");
+        }
+
+        // 2. Insert Transaction Record (রেকর্ড রাখা জরুরি)
+        $txn_query = "INSERT INTO transactions (user_id, type, amount, description, created_at, created_by) 
+                      VALUES (:uid, 'cash_collection', :amt, 'Cash collected by Admin', NOW(), :admin)";
+        $txn_stmt = $db->prepare($txn_query);
+        $txn_stmt->bindParam(':uid', $provider_id);
+        $txn_stmt->bindParam(':amt', $amount);
+        $txn_stmt->bindParam(':admin', $admin_id);
+
+        if(!$txn_stmt->execute()){
+             throw new Exception("Transaction log failed.");
+        }
+
+        $db->commit();
+        
+        echo json_encode(["status" => true, "message" => "Cash collected successfully!"]);
+
+    } catch (Exception $e) {
+        $db->rollBack();
+        echo json_encode(["status" => false, "message" => "Error: " . $e->getMessage()]);
+    }
+} else {
+    echo json_encode(["status" => false, "message" => "Incomplete data."]);
 }
-
-// Input Validation
-$data = json_decode(file_get_contents("php://input"), true);
-$provider_id = isset($data['provider_id']) ? (int)$data['provider_id'] : 0;
-$amount = isset($data['amount']) ? (float)$data['amount'] : 0;
-$note = isset($data['note']) ? $conn->real_escape_string($data['note']) : '';
-
-if ($provider_id == 0 || $amount <= 0) {
-    echo json_encode(["status" => "error", "message" => "Valid Provider ID and Amount required"]);
-    exit();
-}
-
-// Check if provider exists
-$provider = $conn->query("SELECT current_due FROM users WHERE id = $provider_id AND role = 'provider'")->fetch_assoc();
-if (!$provider) {
-    echo json_encode(["status" => "error", "message" => "Provider not found"]);
-    exit();
-}
-
-// Transaction Process (Start)
-$conn->begin_transaction();
-
-try {
-    // 1. Insert Transaction Record
-    $sql_trans = "INSERT INTO transactions (provider_id, amount, note) VALUES ($provider_id, $amount, '$note')";
-    if (!$conn->query($sql_trans)) throw new Exception("Transaction Failed");
-
-    // 2. Decrease Due Amount from User Table
-    $sql_update = "UPDATE users SET current_due = current_due - $amount WHERE id = $provider_id";
-    if (!$conn->query($sql_update)) throw new Exception("Balance Update Failed");
-
-    $conn->commit();
-    echo json_encode(["status" => "success", "message" => "Money Collected Successfully"]);
-
-} catch (Exception $e) {
-    $conn->rollback();
-    echo json_encode(["status" => "error", "message" => $e->getMessage()]);
-}
-
-$conn->close();
 ?>
