@@ -11,16 +11,19 @@ if (!isset($_GET['provider_id'])) {
     exit();
 }
 
-$provider_id = $_GET['provider_id'];
+$provider_id = (int)$_GET['provider_id']; // Security check
 
-// ✅ FIX: 'pending' ছাড়া বাকি সব Active স্ট্যাটাস এখানে আসবে
+// ✅ Active jobs list
 $sql = "SELECT id, service_name, location, details, amount, booking_date, status, customer_name, customer_phone 
         FROM bookings 
-        WHERE provider_id = '$provider_id' 
+        WHERE provider_id = ? 
         AND status IN ('accepted', 'ongoing', 'working', 'arrived', 'in_progress') 
         ORDER BY booking_date DESC";
 
-$result = $conn->query($sql);
+$stmt = $conn->prepare($sql);
+$stmt->bind_param("i", $provider_id);
+$stmt->execute();
+$result = $stmt->get_result();
 
 $active_jobs = [];
 if ($result->num_rows > 0) {
@@ -32,5 +35,6 @@ if ($result->num_rows > 0) {
     echo json_encode(["status" => "success", "message" => "No active jobs found", "data" => []]);
 }
 
+$stmt->close();
 $conn->close();
 ?>

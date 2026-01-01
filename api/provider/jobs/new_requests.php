@@ -11,15 +11,18 @@ if (!isset($_GET['provider_id'])) {
     exit();
 }
 
-$provider_id = $_GET['provider_id'];
+$provider_id = (int)$_GET['provider_id']; // ID কে ইন্টিজারে কনভার্ট করা হলো (Security)
 
 // শুধুমাত্র 'pending' কাজগুলো দেখাবে
 $sql = "SELECT id, service_name, location, details, amount, booking_date 
         FROM bookings 
-      WHERE provider_id = '$provider_id' AND status = 'pending'
+        WHERE provider_id = ? AND status = 'pending'
         ORDER BY id DESC";
 
-$result = $conn->query($sql);
+$stmt = $conn->prepare($sql);
+$stmt->bind_param("i", $provider_id);
+$stmt->execute();
+$result = $stmt->get_result();
 
 $jobs = [];
 if ($result->num_rows > 0) {
@@ -31,6 +34,6 @@ if ($result->num_rows > 0) {
     echo json_encode(["status" => "success", "message" => "No new job requests", "data" => []]);
 }
 
-
+$stmt->close();
 $conn->close();
 ?>
