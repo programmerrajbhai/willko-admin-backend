@@ -25,6 +25,8 @@ foreach ($possible_paths as $path) {
     }
 }
 
+
+
 if (!$db_loaded) {
     echo json_encode(["status" => "error", "message" => "Database connection failed!"]);
     exit();
