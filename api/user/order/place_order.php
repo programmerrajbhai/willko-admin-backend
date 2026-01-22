@@ -60,22 +60,32 @@ $user_id = $user_data['id'];
 // 5. Input Processing
 $data = json_decode(file_get_contents("php://input"), true);
 
+// Validation
 if (empty($data['items']) || empty($data['address_id']) || empty($data['schedule_date'])) {
-    echo json_encode(["status" => "error", "message" => "Missing required fields"]);
+    echo json_encode(["status" => "error", "message" => "Missing required fields (items, address, date)"]);
     exit();
 }
 
+// --- Data Extraction & Escaping ---
 $address_id = (int)$data['address_id'];
+$full_address = isset($data['full_address']) ? $conn->real_escape_string($data['full_address']) : ''; // Backup Address
+
 $schedule_date = $conn->real_escape_string($data['schedule_date']);
 $schedule_time = $conn->real_escape_string($data['schedule_time']);
-$payment_method = isset($data['payment_method']) ? $conn->real_escape_string($data['payment_method']) : 'cod';
-$coupon_code = isset($data['coupon_code']) ? $conn->real_escape_string($data['coupon_code']) : null;
 
-// অ্যাপ থেকে নাম/ফোন আসলে সেটা নেব, নাহলে প্রোফাইল থেকে ডিফল্ট
+$payment_method = isset($data['payment_method']) ? $conn->real_escape_string($data['payment_method']) : 'cod';
+$payment_status = isset($data['payment_status']) ? $conn->real_escape_string($data['payment_status']) : 'unpaid';
+$transaction_id = isset($data['transaction_id']) ? $conn->real_escape_string($data['transaction_id']) : '';
+
+$coupon_code = isset($data['coupon_code']) ? $conn->real_escape_string($data['coupon_code']) : null;
+$order_note = isset($data['order_note']) ? $conn->real_escape_string($data['order_note']) : '';
+$platform = isset($data['platform']) ? $conn->real_escape_string($data['platform']) : 'android';
+
+// Contact Info (Use input if provided, else fallback to profile)
 $contact_name = !empty($data['contact_name']) ? $conn->real_escape_string($data['contact_name']) : $user_data['name'];
 $contact_phone = !empty($data['contact_phone']) ? $conn->real_escape_string($data['contact_phone']) : $user_data['phone'];
 
-// 6. Calculate Totals
+// 6. Calculate Totals (Server Side Validation)
 $sub_total = 0;
 $valid_items = [];
 
@@ -84,57 +94,100 @@ foreach ($data['items'] as $item) {
     $qty = (int)$item['quantity'];
     if ($qty < 1) continue;
 
+    // Fetch Price form Database (Never trust client side price)
     $s_query = $conn->query("SELECT name, price, discount_price FROM services WHERE id = $s_id AND status = 'active'");
     if ($s_query->num_rows > 0) {
         $service = $s_query->fetch_assoc();
+        
+        // Price Logic
         $unit_price = ($service['discount_price'] > 0) ? $service['discount_price'] : $service['price'];
+        
         $total = $unit_price * $qty;
         $sub_total += $total;
         
         $valid_items[] = [
-            'service_id' => $s_id, 'name' => $service['name'], 
-            'quantity' => $qty, 'unit_price' => $unit_price, 'total_price' => $total
+            'service_id' => $s_id, 
+            'name' => $service['name'], 
+            'quantity' => $qty, 
+            'unit_price' => $unit_price, 
+            'total_price' => $total
         ];
     }
 }
 
 if (empty($valid_items)) {
-    echo json_encode(["status" => "error", "message" => "Invalid services selected"]);
+    echo json_encode(["status" => "error", "message" => "Invalid or unavailable services selected"]);
     exit();
 }
 
-// Discount Logic (Simple Example)
-$discount_amount = 0; 
+// Discount Calculation (Server Side)
+$discount_amount = 0;
+if ($coupon_code) {
+    // এখানে ভবিষ্যতে কুপন চেক করার লজিক বসাতে পারেন
+    // $discount_amount = checkCoupon($coupon_code, $sub_total);
+}
+
 $final_total = $sub_total - $discount_amount;
 
-// 7. Save to Database
+// 7. Save to Database (Transaction)
 $conn->begin_transaction();
+
 try {
-    // Insert Booking
-    $sql = "INSERT INTO bookings (user_id, address_id, contact_name, contact_phone, sub_total, discount_amount, final_total, schedule_date, schedule_time, payment_method, status, coupon_code) 
-            VALUES ($user_id, $address_id, '$contact_name', '$contact_phone', '$sub_total', '$discount_amount', '$final_total', '$schedule_date', '$schedule_time', '$payment_method', 'pending', '$coupon_code')";
+    // A. Insert into `bookings` table
+    // আপনার ডাটাবেসে এই কলামগুলো থাকতে হবে: 
+    // full_address, payment_status, transaction_id, order_note, platform, created_at
     
-    if (!$conn->query($sql)) throw new Exception($conn->error);
+    $sql = "INSERT INTO bookings (
+                user_id, address_id, full_address, 
+                contact_name, contact_phone, 
+                sub_total, discount_amount, final_total, 
+                schedule_date, schedule_time, 
+                payment_method, payment_status, transaction_id, 
+                status, coupon_code, order_note, platform, created_at
+            ) VALUES (
+                $user_id, $address_id, '$full_address',
+                '$contact_name', '$contact_phone',
+                '$sub_total', '$discount_amount', '$final_total',
+                '$schedule_date', '$schedule_time',
+                '$payment_method', '$payment_status', '$transaction_id',
+                'pending', '$coupon_code', '$order_note', '$platform', NOW()
+            )";
+    
+    if (!$conn->query($sql)) {
+        throw new Exception("Order insertion failed: " . $conn->error);
+    }
+    
     $booking_id = $conn->insert_id;
 
-    // Insert Items
+    // B. Insert into `booking_items` table
     $stmt = $conn->prepare("INSERT INTO booking_items (booking_id, service_id, service_name, quantity, unit_price, total_price) VALUES (?, ?, ?, ?, ?, ?)");
+    
     foreach ($valid_items as $item) {
         $stmt->bind_param("iisidd", $booking_id, $item['service_id'], $item['name'], $item['quantity'], $item['unit_price'], $item['total_price']);
-        $stmt->execute();
+        
+        if (!$stmt->execute()) {
+            throw new Exception("Item insertion failed: " . $stmt->error);
+        }
     }
 
+    // C. Commit Transaction
     $conn->commit();
+
     echo json_encode([
         "status" => "success", 
         "message" => "Booking Successful!", 
         "booking_id" => $booking_id,
-        "user_info" => ["name" => $contact_name, "phone" => $contact_phone]
+        "total_amount" => $final_total
     ]);
 
 } catch (Exception $e) {
+    // D. Rollback on Error
     $conn->rollback();
-    echo json_encode(["status" => "error", "message" => "Database Error: " . $e->getMessage()]);
+    echo json_encode([
+        "status" => "error", 
+        "message" => "System Error: " . $e->getMessage()
+    ]);
 }
+
 $conn->close();
 ?>
