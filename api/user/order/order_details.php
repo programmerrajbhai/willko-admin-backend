@@ -50,10 +50,10 @@ if (!$token) {
 }
 
 $token = $conn->real_escape_string($token);
-$userCheck = $conn->query("SELECT id FROM users WHERE auth_token = '$token' AND role = 'user'");
+$userCheck = $conn->query("SELECT id FROM users WHERE auth_token = '$token' AND status = 'active'");
 
 if ($userCheck->num_rows == 0) {
-    echo json_encode(["status" => "error", "message" => "Invalid Token!"]);
+    echo json_encode(["status" => "error", "message" => "Invalid Token or Account Suspended!"]);
     exit();
 }
 $user_id = $userCheck->fetch_assoc()['id'];
@@ -66,10 +66,11 @@ if (!isset($_GET['order_id'])) {
 
 $order_id = (int)$_GET['order_id'];
 
-// 5. Fetch Order Details (with Address & Provider Info)
-// LEFT JOIN ব্যবহার করা হয়েছে কারণ প্রভাইডার অ্যাসাইন না থাকলেও যেন অর্ডার দেখায়
+// 5. Fetch Order Details
+// ✅ UPDATE: আমরা bookings টেবিলের 'full_address' কে অগ্রাধিকার দিচ্ছি
 $sql = "SELECT b.*, 
-               ua.label as address_label, ua.address as full_address, ua.latitude, ua.longitude,
+               ua.label as address_label, 
+               ua.latitude, ua.longitude,
                p.name as provider_name, p.phone as provider_phone, p.image as provider_image, p.rating as provider_rating
         FROM bookings b
         LEFT JOIN user_addresses ua ON b.address_id = ua.id
@@ -81,7 +82,7 @@ $result = $conn->query($sql);
 if ($result->num_rows > 0) {
     $order = $result->fetch_assoc();
 
-    // 6. Fetch Order Items (Services)
+    // 6. Fetch Order Items
     $items_sql = "SELECT service_name, quantity, unit_price, total_price 
                   FROM booking_items 
                   WHERE booking_id = $order_id";
@@ -92,27 +93,35 @@ if ($result->num_rows > 0) {
         $items[] = $item;
     }
 
-    // 7. Format Response
-    // প্রভাইডারের ছবি থাকলে ফুল URL বানানো
+    // 7. Provider Image URL Handling
     $provider_info = null;
     if (!empty($order['provider_name'])) {
+        // ইমেজ থাকলে URL বানাবে, না থাকলে null
+        $p_image = !empty($order['provider_image']) 
+            ? "http://" . $_SERVER['HTTP_HOST'] . "/WillkoServiceApi/api/uploads/providers/" . $order['provider_image'] 
+            : null;
+
         $provider_info = [
             "name" => $order['provider_name'],
             "phone" => $order['provider_phone'],
-            "image" => "http://" . $_SERVER['HTTP_HOST'] . "/WillkoServiceApi/api/uploads/providers/" . $order['provider_image'],
+            "image" => $p_image,
             "rating" => $order['provider_rating']
         ];
     }
+
+    // 8. Address Handling (Backup Logic)
+    // যদি bookings টেবিলে full_address থাকে সেটা নিবে, না হলে user_addresses টেবিল থেকে নিবে
+    $final_address = !empty($order['full_address']) ? $order['full_address'] : "Address details not available";
 
     echo json_encode([
         "status" => "success",
         "data" => [
             "order_info" => [
                 "id" => $order['id'],
-                "status" => $order['status'],
-                "schedule_date" => $order['schedule_date'],
+                "status" => ucfirst($order['status']), // Capitalize first letter
+                "schedule_date" => date("d M, Y", strtotime($order['schedule_date'])), // Format Date
                 "schedule_time" => $order['schedule_time'],
-                "payment_method" => $order['payment_method'],
+                "payment_method" => strtoupper($order['payment_method']),
                 "created_at" => $order['created_at']
             ],
             "price_details" => [
@@ -121,18 +130,18 @@ if ($result->num_rows > 0) {
                 "final_total" => (float)$order['final_total']
             ],
             "address" => [
-                "label" => $order['address_label'],
-                "details" => $order['full_address'],
+                "label" => $order['address_label'] ?? "Home",
+                "details" => $final_address, // ✅ Fixed Address Logic
                 "lat" => (float)$order['latitude'],
                 "lng" => (float)$order['longitude']
             ],
             "items" => $items,
-            "provider" => $provider_info // প্রভাইডার না থাকলে null যাবে
+            "provider" => $provider_info
         ]
     ]);
 
 } else {
-    echo json_encode(["status" => "error", "message" => "Order not found or access denied"]);
+    echo json_encode(["status" => "error", "message" => "Order not found"]);
 }
 
 $conn->close();

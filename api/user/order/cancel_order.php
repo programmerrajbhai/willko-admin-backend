@@ -1,7 +1,6 @@
 <?php
 // File: api/user/order/cancel_order.php
 
-// 1. Error Reporting
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
@@ -9,7 +8,9 @@ header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: POST");
 
-// 2. Database Connection
+// ==============================================
+// ✅ 1. ROBUST DATABASE CONNECTION
+// ==============================================
 $current_dir = __DIR__;
 $possible_paths = [
     __DIR__ . '/../../../db.php', 
@@ -26,11 +27,12 @@ foreach ($possible_paths as $path) {
 }
 
 if (!$db_loaded) {
+    http_response_code(500);
     echo json_encode(["status" => "error", "message" => "Database connection failed!"]);
     exit();
 }
 
-// 3. Auth Helper (Check User)
+// 2. Auth Check
 function getBearerToken() {
     $headers = null;
     if (isset($_SERVER['Authorization'])) $headers = trim($_SERVER["Authorization"]);
@@ -45,58 +47,54 @@ function getBearerToken() {
 
 $token = getBearerToken();
 if (!$token) {
-    echo json_encode(["status" => "error", "message" => "Unauthorized!"]);
+    echo json_encode(["status" => "error", "message" => "Unauthorized"]);
     exit();
 }
 
 $token = $conn->real_escape_string($token);
-$userCheck = $conn->query("SELECT id FROM users WHERE auth_token = '$token' AND role = 'user'");
+$userCheck = $conn->query("SELECT id FROM users WHERE auth_token = '$token' AND status = 'active'");
 
 if ($userCheck->num_rows == 0) {
-    echo json_encode(["status" => "error", "message" => "Invalid Token!"]);
+    echo json_encode(["status" => "error", "message" => "Invalid Token"]);
     exit();
 }
 $user_id = $userCheck->fetch_assoc()['id'];
 
-// 4. Input Handling
-$data = json_decode(file_get_contents("php://input"), true);
+// 3. Cancel Logic
+$data = json_decode(file_get_contents("php://input"));
 
-if (empty($data['order_id'])) {
-    echo json_encode(["status" => "error", "message" => "Order ID is required"]);
+if (!isset($data->order_id) || empty($data->order_id)) {
+    echo json_encode(["status" => "error", "message" => "Order ID required"]);
     exit();
 }
 
-$order_id = (int)$data['order_id'];
-$reason = isset($data['reason']) ? $conn->real_escape_string($data['reason']) : 'Changed my mind';
+$order_id = (int)$data->order_id;
+$reason = isset($data->reason) ? $conn->real_escape_string($data->reason) : "Changed my mind";
 
-// 5. Check Order Status
+// Check order status
 $checkSql = "SELECT status FROM bookings WHERE id = $order_id AND user_id = $user_id";
-$result = $conn->query($checkSql);
+$checkRes = $conn->query($checkSql);
 
-if ($result->num_rows > 0) {
-    $order = $result->fetch_assoc();
+if ($checkRes->num_rows == 0) {
+    echo json_encode(["status" => "error", "message" => "Order not found"]);
+    exit();
+}
 
-    // শুধুমাত্র 'pending' অবস্থায় থাকলে ক্যানসেল করা যাবে
-    if ($order['status'] === 'pending') {
-        
-        // Update Status to 'cancelled'
-        // অপশনাল: আমরা 'cancellation_reason' রাখার জন্য কলাম যোগ করতে পারি, আপাতত শুধু স্ট্যাটাস চেঞ্জ করছি
-        $updateSql = "UPDATE bookings SET status = 'cancelled' WHERE id = $order_id";
-        
-        if ($conn->query($updateSql)) {
-            echo json_encode(["status" => "success", "message" => "Order cancelled successfully"]);
-        } else {
-            echo json_encode(["status" => "error", "message" => "Database Error"]);
-        }
+$currentStatus = strtolower($checkRes->fetch_assoc()['status']);
 
-    } else {
-        echo json_encode([
-            "status" => "error", 
-            "message" => "Order cannot be cancelled. Current status is '" . $order['status'] . "'"
-        ]);
-    }
+// শুধুমাত্র এই স্ট্যাটাসগুলো ক্যানসেল করা যাবে
+if (in_array($currentStatus, ['completed', 'cancelled', 'rejected'])) {
+    echo json_encode(["status" => "error", "message" => "Cannot cancel this order (Current status: $currentStatus)"]);
+    exit();
+}
+
+// ✅ UPDATE STATUS
+$updateSql = "UPDATE bookings SET status = 'cancelled', cancel_reason = '$reason' WHERE id = $order_id";
+
+if ($conn->query($updateSql)) {
+    echo json_encode(["status" => "success", "message" => "Order cancelled successfully"]);
 } else {
-    echo json_encode(["status" => "error", "message" => "Order not found or permission denied"]);
+    echo json_encode(["status" => "error", "message" => "Database Update Failed: " . $conn->error]);
 }
 
 $conn->close();
