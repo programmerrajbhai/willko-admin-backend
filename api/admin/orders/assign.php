@@ -1,29 +1,44 @@
 <?php
-// ফাইল: api/admin/orders/assign.php
+// File: api/admin/orders/assign.php
 
-// ১. এরর রিপোর্টিং এবং হেডার
+// 1. Error Reporting
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: POST");
-header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
 
-// ২. ডাটাবেস কানেকশন
+// ==============================================
+// ✅ 2. ROBUST DATABASE CONNECTION
+// ==============================================
 $current_dir = __DIR__;
-$api_dir = dirname(dirname($current_dir)); // api folder
-if (file_exists($api_dir . '/db.php')) include $api_dir . '/db.php';
-else include dirname($api_dir) . '/db.php';
+$possible_paths = [
+    __DIR__ . '/../../../db.php', 
+    __DIR__ . '/../../db.php',
+];
 
-// ৩. সিকিউরিটি চেক (অ্যাডমিন অথেন্টিকেশন)
+$db_loaded = false;
+foreach ($possible_paths as $path) {
+    if (file_exists($path)) {
+        include_once $path;
+        $db_loaded = true;
+        break;
+    }
+}
+
+if (!$db_loaded) {
+    echo json_encode(["status" => "error", "message" => "Database connection failed"]);
+    exit();
+}
+
+// 3. Auth Helper (Admin Only)
 function getBearerToken() {
     $headers = null;
     if (isset($_SERVER['Authorization'])) $headers = trim($_SERVER["Authorization"]);
     elseif (isset($_SERVER['HTTP_AUTHORIZATION'])) $headers = trim($_SERVER["HTTP_AUTHORIZATION"]);
     elseif (function_exists('apache_request_headers')) {
         $req = apache_request_headers();
-        $req = array_combine(array_map('ucwords', array_keys($req)), array_values($req));
         if (isset($req['Authorization'])) $headers = trim($req['Authorization']);
     }
     if (!empty($headers) && preg_match('/Bearer\s(\S+)/', $headers, $matches)) return $matches[1];
@@ -32,91 +47,107 @@ function getBearerToken() {
 
 $token = getBearerToken();
 if (!$token) {
-    echo json_encode(["status" => "error", "message" => "Unauthorized: Token missing"]);
+    echo json_encode(["status" => "error", "message" => "Unauthorized Access"]);
     exit();
 }
 
-$token = $conn->real_escape_string($token);
-$adminCheck = $conn->query("SELECT id FROM users WHERE auth_token = '$token' AND role = 'admin'");
-
-if ($adminCheck->num_rows == 0) {
-    echo json_encode(["status" => "error", "message" => "Access Denied! Admin Only."]);
+$authStmt = $conn->prepare("SELECT id FROM users WHERE auth_token = ? AND role = 'admin' LIMIT 1");
+$authStmt->bind_param("s", $token);
+$authStmt->execute();
+if ($authStmt->get_result()->num_rows == 0) {
+    echo json_encode(["status" => "error", "message" => "Permission Denied"]);
     exit();
 }
 
-// ৪. ইনপুট ভ্যালিডেশন
+// 4. Input Validation
 $data = json_decode(file_get_contents("php://input"), true);
-$order_id = isset($data['order_id']) ? (int)$data['order_id'] : 0;
-$provider_id = isset($data['provider_id']) ? (int)$data['provider_id'] : 0;
 
-if ($order_id == 0 || $provider_id == 0) {
+if (empty($data['order_id']) || empty($data['provider_id'])) {
     echo json_encode(["status" => "error", "message" => "Order ID and Provider ID are required"]);
     exit();
 }
 
-// ৫. অর্ডারের বর্তমান তথ্য আনা (যাতে বুকিং টেবিলে কপি করা যায়)
-$orderSql = "SELECT o.*, s.name as service_name 
-             FROM orders o 
-             LEFT JOIN services s ON o.service_id = s.id 
-             WHERE o.id = $order_id";
-$orderRes = $conn->query($orderSql);
+$order_id = (int)$data['order_id'];
+$provider_id = (int)$data['provider_id'];
 
-if ($orderRes->num_rows == 0) {
-    echo json_encode(["status" => "error", "message" => "Order not found"]);
+// ==============================================
+// 5. ADVANCED CHECKS (Business Logic)
+// ==============================================
+
+// A. প্রভাইডার ভ্যালিড এবং Active আছে কিনা চেক করা
+$provCheck = $conn->query("SELECT name FROM providers WHERE id = $provider_id AND status = 'active'");
+if ($provCheck->num_rows == 0) {
+    echo json_encode(["status" => "error", "message" => "Provider is inactive or does not exist."]);
+    exit();
+}
+$provider_name = $provCheck->fetch_assoc()['name'];
+
+// B. অর্ডারের বর্তমান অবস্থা চেক করা
+$orderCheck = $conn->query("SELECT status, booking_id_str FROM bookings WHERE id = $order_id");
+if ($orderCheck->num_rows == 0) {
+    echo json_encode(["status" => "error", "message" => "Order not found."]);
+    exit();
+}
+$orderRow = $orderCheck->fetch_assoc();
+$current_status = strtolower($orderRow['status']);
+$booking_str = $orderRow['booking_id_str'] ?? "#ORD-$order_id";
+
+// C. লজিক: অর্ডার কি অলরেডি কমপ্লিট বা ক্যানসেল?
+if (in_array($current_status, ['completed', 'cancelled'])) {
+    echo json_encode(["status" => "error", "message" => "Cannot assign provider to a $current_status order."]);
     exit();
 }
 
-$orderData = $orderRes->fetch_assoc();
-
-// ৬. ট্রানজেকশন শুরু (যাতে দুটি টেবিল একসাথে আপডেট হয়)
+// ==============================================
+// 6. ASSIGNMENT LOGIC (Transaction)
+// ==============================================
 $conn->begin_transaction();
 
 try {
-    // ধাপ ১: orders টেবিল আপডেট করা
-    $updateOrder = $conn->prepare("UPDATE orders SET provider_id = ?, status = 'assigned' WHERE id = ?");
-    $updateOrder->bind_param("ii", $provider_id, $order_id);
+    // ১. OTP জেনারেট করা (Secure Random)
+    $otp = str_pad(rand(0, 9999), 4, '0', STR_PAD_LEFT);
+
+    // ২. বুকিং আপডেট করা (INSERT না, UPDATE হবে)
+    $updateSql = "UPDATE bookings SET 
+                    provider_id = ?, 
+                    status = 'assigned', 
+                    otp = ? 
+                  WHERE id = ?";
     
-    if (!$updateOrder->execute()) {
-        throw new Exception("Failed to update orders table");
+    $stmt = $conn->prepare($updateSql);
+    $stmt->bind_param("isi", $provider_id, $otp, $order_id);
+    
+    if (!$stmt->execute()) {
+        throw new Exception("Failed to assign provider.");
     }
 
-    // ধাপ ২: bookings টেবিলে ডাটা ইনসার্ট করা (Provider App এর জন্য)
-    // OTP জেনারেট করা (যেমন: 4521)
-    $otp = rand(1000, 9999); 
-    $booking_date = date('Y-m-d', strtotime($orderData['schedule_time'])); // Schedule time থেকে date নেওয়া
+    // ৩. প্রভাইডারকে নোটিফিকেশন পাঠানো (Database Entry)
+    // প্রভাইডার অ্যাপ এই টেবিল চেক করে এলার্ট পাবে
+    $notif_title = "New Job Assigned! 🛠️";
+    $notif_msg = "You have been assigned to order $booking_str. Please check your dashboard.";
     
-    // বুকিং টেবিলে ডাটা ডুপ্লিকেট যাতে না হয়, আগে চেক করা ভালো (Optional), তবে আমরা সরাসরি ইনসার্ট করছি
-    $insertBooking = $conn->prepare("INSERT INTO bookings 
-        (user_id, provider_id, service_name, location, amount, status, otp, booking_date, payment_method, payment_status) 
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 'cash', 'pending')");
-        
-    // ডাটা ম্যাপিং
-    // user_id, provider_id, service_name, location (from address), amount (total_price), otp, date
-    $insertBooking->bind_param("iisssss", 
-        $orderData['user_id'], 
-        $provider_id, 
-        $orderData['service_name'], 
-        $orderData['address'], 
-        $orderData['total_price'], 
-        $otp,
-        $booking_date
-    );
+    $notifSql = "INSERT INTO notifications (provider_id, title, message, type) VALUES (?, ?, ?, 'order_assigned')";
+    $notifStmt = $conn->prepare($notifSql);
+    $notifStmt->bind_param("iss", $provider_id, $notif_title, $notif_msg);
+    $notifStmt->execute();
 
-    if (!$insertBooking->execute()) {
-        throw new Exception("Failed to sync with Provider App (Bookings Table Error)");
-    }
-
-    // সব ঠিক থাকলে কমিট করা
+    // ৪. সাকসেস কমিট
     $conn->commit();
+
     echo json_encode([
-        "status" => "success", 
-        "message" => "Provider Assigned & Notification Sent!",
-        "otp" => $otp // ডিবাগিং এর জন্য OTP দেখাচ্ছি
+        "status" => "success",
+        "message" => "Provider ($provider_name) assigned successfully!",
+        "data" => [
+            "order_id" => $order_id,
+            "provider" => $provider_name,
+            "otp" => $otp, // Admin panel e OTP dekhar jonno (Debug)
+            "new_status" => "Assigned"
+        ]
     ]);
 
 } catch (Exception $e) {
-    $conn->rollback(); // কোনো ভুল হলে আগের অবস্থায় ফিরে যাবে
-    echo json_encode(["status" => "error", "message" => "Error: " . $e->getMessage()]);
+    $conn->rollback();
+    echo json_encode(["status" => "error", "message" => "System Error: " . $e->getMessage()]);
 }
 
 $conn->close();
