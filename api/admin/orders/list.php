@@ -7,7 +7,7 @@ header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: GET");
 
-// ✅ ROBUST DATABASE CONNECTION
+// 1. ROBUST DATABASE CONNECTION
 $possible_paths = [
     __DIR__ . '/../../../db.php', 
     __DIR__ . '/../../db.php',
@@ -27,7 +27,7 @@ if (!$db_loaded) {
     exit();
 }
 
-// 1. Auth Check (Admin Only)
+// 2. Auth Check (Admin Only)
 function getBearerToken() {
     $headers = null;
     if (isset($_SERVER['Authorization'])) $headers = trim($_SERVER["Authorization"]);
@@ -53,17 +53,19 @@ if ($authCheck->num_rows == 0) {
     exit();
 }
 
-// 2. Fetch Orders Logic
+// 3. Fetch Orders Logic
 $status = isset($_GET['status']) ? $_GET['status'] : 'all';
 
-// 🔴 FIX: Removed 'b.booking_id_str' from SELECT query
+// 🔴 UPDATE: Joined Provider Info (Name, Image, Rating)
+// Note: Assuming providers are stored in 'users' table with role='provider'. 
+// If you have a separate 'providers' table, change 'LEFT JOIN users p' to 'LEFT JOIN providers p'
 $sql = "SELECT b.id, b.final_total, b.schedule_date, b.schedule_time, 
                b.status, b.payment_status, b.created_at,
-               u.name as customer_name, u.phone as customer_phone,
-               p.name as provider_name
+               u.name as customer_name, u.phone as customer_phone, u.image as customer_image,
+               p.name as provider_name, p.image as provider_image, p.rating as provider_rating
         FROM bookings b
         LEFT JOIN users u ON b.user_id = u.id
-        LEFT JOIN providers p ON b.provider_id = p.id";
+        LEFT JOIN users p ON b.provider_id = p.id"; 
 
 if ($status != 'all') {
     $status = $conn->real_escape_string($status);
@@ -77,15 +79,30 @@ $orders = [];
 
 if ($result && $result->num_rows > 0) {
     while ($row = $result->fetch_assoc()) {
-        // ✅ FIX: Generating ID manually in PHP
+        
+        // ID Generation
         $generated_booking_id = "#ORD-" . str_pad($row['id'], 4, '0', STR_PAD_LEFT);
+
+        // Provider Image Handling
+        $provider_image = "";
+        if (!empty($row['provider_image'])) {
+            $provider_image = "http://" . $_SERVER['HTTP_HOST'] . "/WillkoServiceApi/api/uploads/" . $row['provider_image'];
+        }
 
         $orders[] = [
             "id" => $row['id'],
-            "booking_id" => $generated_booking_id, // e.g. #ORD-0005
+            "booking_id" => $generated_booking_id,
+            
+            // Customer Info
             "customer_name" => $row['customer_name'] ?? "Unknown",
             "customer_phone" => $row['customer_phone'] ?? "-",
-            "provider_name" => $row['provider_name'] ?? "Not Assigned",
+            
+            // ✅ Provider Info (Updated)
+            "provider_name" => $row['provider_name'], // Will be null if not assigned
+            "provider_image" => $provider_image,
+            "provider_rating" => $row['provider_rating'] ?? "0.0",
+
+            // Order Info
             "schedule_date" => date("d M, Y", strtotime($row['schedule_date'])),
             "schedule_time" => $row['schedule_time'],
             "price" => "SAR " . number_format($row['final_total'], 0),
