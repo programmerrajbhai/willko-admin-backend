@@ -1,7 +1,5 @@
 <?php
 // File: api/admin/orders/update_payment.php
-
-// 1. Error Reporting
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
@@ -9,9 +7,7 @@ header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: POST");
 
-// ==============================================
-// ✅ 2. ROBUST DATABASE CONNECTION
-// ==============================================
+// 1. ROBUST DATABASE CONNECTION
 $current_dir = __DIR__;
 $possible_paths = [
     __DIR__ . '/../../../db.php', 
@@ -33,7 +29,7 @@ if (!$db_loaded) {
     exit();
 }
 
-// 3. Auth Check (Admin Only)
+// 2. Auth Helper
 function getBearerToken() {
     $headers = null;
     if (isset($_SERVER['Authorization'])) $headers = trim($_SERVER["Authorization"]);
@@ -61,31 +57,51 @@ if ($authStmt->get_result()->num_rows == 0) {
     exit();
 }
 
-// 4. Update Logic
-$data = json_decode(file_get_contents("php://input"), true);
+// ======================================================
+// 3. UNIVERSAL INPUT HANDLING (JSON + FORM DATA)
+// ======================================================
+$data = [];
 
-if (isset($data['order_id']) && isset($data['payment_status'])) {
-    
-    $id = (int)$data['order_id'];
-    $status = strtolower(trim($data['payment_status'])); // paid / unpaid
+// Try to get JSON data
+$rawInput = file_get_contents("php://input");
+$jsonData = json_decode($rawInput, true);
 
-    // Validate Status
-    if (!in_array($status, ['paid', 'unpaid'])) {
-        echo json_encode(["status" => "error", "message" => "Invalid payment status (Use 'paid' or 'unpaid')"]);
-        exit();
-    }
-
-    // Secure Update Query (Using 'bookings' table)
-    $stmt = $conn->prepare("UPDATE bookings SET payment_status = ? WHERE id = ?");
-    $stmt->bind_param("si", $status, $id);
-
-    if ($stmt->execute()) {
-        echo json_encode(["status" => "success", "message" => "Payment status updated to " . ucfirst($status)]);
-    } else {
-        echo json_encode(["status" => "error", "message" => "Database error: " . $conn->error]);
-    }
+if (!empty($jsonData)) {
+    $data = $jsonData;
 } else {
-    echo json_encode(["status" => "error", "message" => "Incomplete data. Required: order_id, payment_status"]);
+    // Fallback to Form Data ($_POST)
+    $data = $_POST;
+}
+
+// Debugging (Remove in production if needed)
+if (empty($data)) {
+    echo json_encode(["status" => "error", "message" => "No data received. Ensure you are sending JSON or Form Data."]);
+    exit();
+}
+
+// 4. Process Data
+$order_id = isset($data['order_id']) ? (int)$data['order_id'] : 0;
+$payment_status = isset($data['payment_status']) ? strtolower(trim($data['payment_status'])) : ''; // paid / unpaid
+
+// Validation
+if ($order_id == 0) {
+    echo json_encode(["status" => "error", "message" => "Missing order_id"]);
+    exit();
+}
+
+if (!in_array($payment_status, ['paid', 'unpaid'])) {
+    echo json_encode(["status" => "error", "message" => "Invalid payment_status. Allowed: 'paid', 'unpaid'"]);
+    exit();
+}
+
+// 5. Update Database
+$stmt = $conn->prepare("UPDATE bookings SET payment_status = ? WHERE id = ?");
+$stmt->bind_param("si", $payment_status, $order_id);
+
+if ($stmt->execute()) {
+    echo json_encode(["status" => "success", "message" => "Payment status updated to " . ucfirst($payment_status)]);
+} else {
+    echo json_encode(["status" => "error", "message" => "Database Error: " . $conn->error]);
 }
 
 $conn->close();
